@@ -23,6 +23,7 @@ Usage:
     bcdl-free setdefault [-d | --dir <dir>][-e | --email <email>][-z | --zipcode <zipcode>]
         [-c | --country <country>][-f | --format <format>]
     bcdl-free defaults
+    bcdl-free redownload_artists
     bcdl-free clear
     bcdl-free (-h | --help)
     bcdl-free --version
