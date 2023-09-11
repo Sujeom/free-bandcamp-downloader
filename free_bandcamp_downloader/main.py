@@ -5,6 +5,7 @@ Usage:
     bcdl-free setdefault [-d | --dir <dir>][-e | --email <email>][-z | --zipcode <zipcode>]
         [-c | --country <country>][-f | --format <format>]
     bcdl-free defaults
+    bcdl-free redownload_artists
     bcdl-free clear
     bcdl-free (-h | --help)
     bcdl-free --version
@@ -50,6 +51,7 @@ from docopt import docopt
 from guerrillamail import GuerrillaMailSession
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.wait import WebDriverWait
@@ -60,6 +62,8 @@ from free_bandcamp_downloader import __version__, config, logger
 arguments = None
 mail_session = None
 expected_emails = 0
+max_emails = 3
+email_queue = []
 mail_album_data = {}
 downloaded = set()
 options = {
@@ -83,24 +87,27 @@ xpath = {
     'country': '//select[@id="fan_email_country"]',
     'zipcode': '//input[@id="fan_email_postalcode"]',
     'preparing': '//span[@class="preparing-title"]',
-    'formats': '//div[@class="item-format button"]',
-    'download': '//a[@class="item-button"]',
+    'formats': '//select[@class="bc-select select-margins"]',
+    'download': '//a[contains(text(), "Download")]',
+    'album-artist': '//div[@id="name-section"]/h3/span',
+    'album-name': '//h2[@class="trackTitle"]',
     'albums': '//a[./p[@class="title"]]',
     'album-link': '//div[@class="download-artwork"]/a',
+    'album-link2': '//div[@id="tralbumArt"]/a',
     'album-tags': '//div[contains(@class, "tralbum-tags-nu")]',
     'album-credits': '//div[@class="tralbumData tralbum-credits"]',
     'album-about': '//div[@class="tralbumData tralbum-about"]',
 }
 
 formats = {
-    'FLAC': 'FLAC',
-    'V0MP3': 'MP3 V0',
-    '320MP3': 'MP3 320',
-    'AAC': 'AAC',
-    'Ogg': 'Ogg Vorbis',
-    'ALAC': 'ALAC',
-    'WAV': 'WAV',
-    'AIFF': 'AIFF'
+    'FLAC': '//option[@value="flac"]',
+    'V0MP3': '//option[@value="mp3-v0"]',
+    '320MP3': '//option[@value="mp3-320"]',
+    'AAC': '//option[@value="aac-hi"]',
+    'Ogg': '//option[@value="vorbis"]',
+    'ALAC': '//option[@value="alac"]',
+    'WAV': '//option[@value="wav"]',
+    'AIFF': '//option[@value="aiff-lossless"]'
 }
 
 
@@ -119,7 +126,8 @@ def get_driver():
     options = Options()
     options.add_argument('--headless')
     driver = webdriver.Firefox(
-        firefox_options=options, service_log_path=os.devnull)
+        options=options)
+        #firefox_options=options, service_log_path=os.devnull)
     driver.implicitly_wait(10)
     return driver
 
@@ -132,18 +140,22 @@ def init_downloaded():
 
 def download_file(driver, album_data=None):
     logger.info('On download page')
-    page_url = driver.find_element_by_xpath(
+    page_url = driver.find_element(By.XPATH,
         xpath['album-link']).get_attribute('href')
     page_url = urlsplit(page_url).geturl()
+    if '?' in page_url:
+        page_url = page_url.split('?')[0]
+    print(page_url)
     if album_data is None:
+        print(mail_album_data)
         album_data = mail_album_data[page_url]
-    driver.find_element_by_xpath(xpath['formats']).click()
+    driver.find_element(By.XPATH,xpath['formats']).click()
     wait()
-    driver.find_element_by_xpath(
-        f'//*[text() = "{formats[options["format"]]}"]').click()
+    driver.find_element(By.XPATH,
+        f'{formats[options["format"]]}').click()
     logger.info(f'Set format to {formats[options["format"]]}')
     wait()
-    button = driver.find_element_by_xpath(xpath['download'])
+    button = driver.find_element(By.XPATH,xpath['download'])
     WebDriverWait(driver, 60).until(EC.visibility_of(button))
     url = button.get_attribute('href')
     response = urllib.request.urlopen(url)
@@ -151,7 +163,14 @@ def download_file(driver, album_data=None):
         response.headers.get_filename().encode('latin-1').decode('utf-8'))
     length = int(response.getheader('content-length'))
     block_size = length // 10
-    file_name = os.path.join(options['dir'], name)
+    print('album_data')
+    print(album_data)
+    expanded_path = os.path.expanduser(os.path.expandvars(f'{options["dir"]}/{album_data["artist"]}'))
+    print(expanded_path)
+    if not os.path.exists(expanded_path):
+        print('path does not exist')
+        os.makedirs(expanded_path)
+    file_name = os.path.join(expanded_path, name)
     with open(file_name, 'wb') as f:
         size = 0
         while True:
@@ -204,6 +223,7 @@ def download_file(driver, album_data=None):
 def download_files(driver, urls):
     for url in urls:
         driver.get(url)
+        print(f"album URL: {url}")
         download_file(driver)
 
 
@@ -213,38 +233,62 @@ def get_text(text):
     return BeautifulSoup(text, features='html.parser').get_text()
 
 
-def download_album(driver, url):
+def download_album(driver, url, email_album=False, retry=False):
+    print(f"album URL: {url}")
+    og_url = url
     # Remove url params
     url = urlsplit(url).geturl()
+    if '?' in url:
+        url = url.split('?')[0]
+    print(f'url without params: {url}')
     if url in downloaded and not arguments['--force']:
         logger.error(
             f'{url} already downloaded. To download anyways, use option --force')
         return f'{url} already downloaded. To download anyways, use option --force'
     driver.get(url)
     wait()
+    #sys.exit(0)
     try:
         # Get album data
+        #album data is redundant when dealing with email downloads
         album_data = {
+            'album': None,
+            'artist': None,
             'about': None,
             'credits': None,
             'tags': None
         }
         try:
-            s = driver.find_element_by_xpath(
+            s = driver.find_element(By.XPATH,
+                xpath['album-name']).get_attribute('innerHTML')
+            s = get_text(s)
+            album_data['album'] = s
+        except Exception as e:
+            logger.info(f"Could not get album name - {e.__class__}: {e}")
+        try:
+            s = driver.find_element(By.XPATH,
+                xpath['album-artist']).get_attribute('innerHTML')
+            s = get_text(s)
+            album_data['artist'] = s
+        except Exception as e:
+            logger.info(f"Could not get album artist - {e.__class__}: {e}")
+
+        try:
+            s = driver.find_element(By.XPATH,
                 xpath['album-about']).get_attribute('innerHTML')
             s = get_text(s)
             album_data['about'] = s
         except Exception as e:
             logger.info(f"Could not get album about - {e.__class__}: {e}")
         try:
-            s = driver.find_element_by_xpath(
+            s = driver.find_element(By.XPATH,
                 xpath['album-credits']).get_attribute('innerHTML')
             s = get_text(s)
             album_data['credits'] = s
         except Exception as e:
             logger.info(f"Could not get album credits - {e.__class__}: {e}")
         try:
-            s = driver.find_element_by_xpath(
+            s = driver.find_element(By.XPATH,
                 xpath['album-tags']).get_attribute('innerHTML')
             tags = {a.text for a in BeautifulSoup(
                 s, features='html.parser', parse_only=SoupStrainer('a'))}
@@ -254,63 +298,112 @@ def download_album(driver, url):
 
         logger.info(f"Album data: {album_data}")
 
-        button = driver.find_element_by_xpath(xpath['buy'])
-        if button.text == 'Free Download':
-            logger.info(f'{url} is Free Download')
-            button.click()
-            wait()
-            return download_file(driver, album_data)
-        else:
-            # name your price download
-            logger.info(f'{url} is not Free Download')
-            button.click()
-            wait()
-            price_input = driver.find_element_by_xpath(xpath['price'])
-            price_input.click()
-            price_input.send_keys('0')
-            wait()
+        button = driver.find_element(By.XPATH,xpath['buy'])
+        if button.text == 'Free Download' and retry == False:
             try:
-                driver.find_element_by_xpath(xpath['download-nyp']).click()
-            except:
-                logger.error(f'{url} is not free')
-                return f'{url} is not free'
-            checkout = driver.find_element_by_xpath(xpath['checkout'])
-            if checkout.text == 'Download Now':
-                checkout.click()
+                logger.info(f'{url} is Free Download')
+                button.click()
                 wait()
                 return download_file(driver, album_data)
-            else:
-                init_email()
-                logger.info(f'{url} requires email')
-                # fill out info
-                driver.find_element_by_xpath(
-                    xpath['email']).send_keys(options['email'])
+            except:
+                return download_album(driver, og_url, email_album, True)
+        else:
+             # name your price download
+             logger.info(f'{url} is not Free Download')
+             button.click()
+             wait()
+             try:
+                price_input = driver.find_element(By.XPATH,xpath['price'])
+                price_input.click()
+                price_input.send_keys('0')
                 wait()
-                driver.find_element_by_xpath(
-                    xpath['zipcode']).send_keys(options['zipcode'])
-                wait()
-                Select(driver.find_element_by_xpath(
-                    xpath['country'])).select_by_visible_text(options['country'])
-                wait()
-                checkout.click()
-                global expected_emails
-                expected_emails += 1
-                mail_album_data[url] = album_data
+             except:
+                 pass
+             try:
+                 driver.find_element(By.XPATH,xpath['download-nyp']).click()
+                 checkout = driver.find_element(By.XPATH,xpath['checkout'])
+             except:
+                 try:
+                    checkout = driver.find_element(By.XPATH,xpath['checkout'])
+                 except:
+                    logger.error(f'{url} is not free')
+                    return f'{url} is not free'
+             if checkout.text == 'Download Now':
+                 checkout.click()
+                 wait()
+                 return download_file(driver, album_data)
+             elif email_album == True:
+                 init_email()
+                 # fill out info
+                 driver.find_element(By.XPATH,
+                     xpath['email']).send_keys(options['email'])
+                 wait()
+                 driver.find_element(By.XPATH,
+                     xpath['zipcode']).send_keys(options['zipcode'])
+                 wait()
+                 Select(driver.find_element(By.XPATH,
+                     xpath['country'])).select_by_visible_text(options['country'])
+                 wait()
+                 checkout.click()
+                 global expected_emails
+                 expected_emails += 1
+             else:
+                 logger.info(f'{url} requires email')
+                 logger.info(f'adding {url} to email queue')
+                 global email_queue
+                 email_queue.append(url)
+                 mail_album_data[url] = album_data
+                 logger.info(f'mail album data')
+                 logger.info(mail_album_data)
+                
     except Exception as e:
         logger.error(f"Error downloading {url} - {e.__class__}: {e}")
         return e
-
 
 def download_albums(driver, urls):
     for link in urls:
         logger.info(f'Downloading {link}')
         download_album(driver, link)
 
+def build_artists_hash():
+    global arguments
+    artist_hash = set(())
+    with open(config.get('download_history_file')) as f:
+        for line in f.readlines():
+            match = re.search(r"(^.*[:][/][/].+[.].+)/(.*)/(.*)", line)
+
+            if match:
+                if not match.group(1) in artist_hash:
+                    artist_hash.add(match.group(1))
+        # set options
+        for option in options:
+            arg = f'--{option}'
+            if arguments[arg]:
+                options[option] = arguments[arg][0]
+            else:
+                options[option] = config.get(option)
+            if not options[option]:
+                logger.error(
+                    f'{option} is not set, use "bcdl-free setdefault {arg} <{option}>"')
+                sys.exit(1)
+        if options['format'] not in formats:
+            logger.error(
+                f'{options["format"]} is not a valid format. See "bcdl-free -h" for valid formats')
+            sys.exit(1)
+        init_downloaded()
+        driver = get_driver()
+        try:
+            for artist in artist_hash:
+                download_label(driver, artist)
+        except:
+            pass
+
 
 def download_label(driver, url):
     driver.get(url)
     links = []
-    for album in driver.find_elements_by_xpath(xpath['albums']):
+    #for album in driver.find_elements_by_xpath(xpath['albums']):
+    for album in driver.find_elements(By.XPATH, xpath['albums']):
         links.append(album.get_attribute('href'))
     download_albums(driver, links)
 
@@ -351,6 +444,8 @@ def main():
                     config.set(option, arguments[arg][0])
         elif arguments['defaults']:
             print(str(config))
+        elif arguments['redownload_artists']:
+            build_artists_hash()
         elif arguments['clear']:
             with open(config.get('download_history_file'), 'w'):
                 pass
@@ -358,8 +453,16 @@ def main():
         checked_ids = set()
         album_urls = set()
         global expected_emails
+        #while len(email_queue) > 0:
         logger.info(f'Waiting for {expected_emails} emails from bandcamp')
-        while expected_emails > 0:
+        global max_emails, email_queue
+        while True:
+                            
+            while expected_emails < max_emails and len(email_queue) > 0:
+                download_album(driver, email_queue.pop(0), email_album=True)
+            if expected_emails <= 0:
+                logger.info('no more expected emails')
+                break
             time.sleep(10)
             try:
                 for email in mail_session.get_email_list():
@@ -375,13 +478,12 @@ def main():
                                 expected_emails -= 1
             except Exception as e:
                 logger.error(e)
-        logger.info(f'Downloading {len(album_urls)} albums...')
-        download_files(driver, album_urls)
+            logger.info(f'Downloading {len(album_urls)} albums...')
+            download_files(driver, album_urls)
     except:
         raise
     finally:
         driver.quit()
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()
