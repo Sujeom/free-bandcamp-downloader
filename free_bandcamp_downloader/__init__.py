@@ -23,6 +23,7 @@ else:
         '~'), '.local', 'share', 'free-bandcamp-downloader')
 
 download_history_file = os.path.join(data_dir, 'downloaded.txt')
+non_free_history_file = os.path.join(data_dir, 'non-free.txt')
 
 default_config = \
     f"""[free-bandcamp-downloader]
@@ -31,7 +32,8 @@ default_config = \
     email = auto
     format = FLAC
     dir = .
-    download_history_file = {download_history_file}"""
+    download_history_file = {download_history_file}
+    non_free_history_file = {non_free_history_file}"""
 
 config_file = os.path.join(config_dir, 'free-bandcamp-downloader.cfg')
 
@@ -45,6 +47,12 @@ if not os.path.exists(download_history_file):
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
     with open(download_history_file, 'w') as f:
+        pass
+
+if not os.path.exists(non_free_history_file):
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    with open(non_free_history_file, 'w') as f:
         pass
 
 parser = ConfigParser()

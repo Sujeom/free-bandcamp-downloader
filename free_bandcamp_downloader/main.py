@@ -1,6 +1,6 @@
 """Download free albums and tracks from Bandcamp
 Usage:
-    bcdl-free (-a <URL> | -l <URL>)[--force][-d | --dir <dir>][-e | --email <email>]
+    bcdl-free (-a <URL> | -l <URL>)[--force][--non-free][-d | --dir <dir>][-e | --email <email>]
         [-z | --zipcode <zipcode>][-c | --country <country>][-f | --format <format>]
     bcdl-free setdefault [-d | --dir <dir>][-e | --email <email>][-z | --zipcode <zipcode>]
         [-c | --country <country>][-f | --format <format>]
@@ -15,8 +15,10 @@ Options:
     -a <URL>                    Download the album at URL
     -l <URL>                    Download all free albums of the label at URL
     --force                     Download even if album has been downloaded before
+    --non-free                  Attempt download of an album even if it is in the not free list
     setdefault                  Set default options
     defaults                    List the default options
+    redownload_artists          Downloads free albums from previously downloaded artists
     clear                       Clear download history
     -d --dir <dir>              Set download directory
     -c --country <country>      Set country
@@ -66,6 +68,7 @@ max_emails = 3
 email_queue = []
 mail_album_data = {}
 downloaded = set()
+non_free = set()
 options = {
     'country': None,
     'zipcode': None,
@@ -136,6 +139,12 @@ def init_downloaded():
     with open(config.get('download_history_file'), 'r') as f:
         for line in f:
             downloaded.add(line.strip())
+
+def init_non_free():
+    with open(config.get('non_free_history_file'), 'r') as f:
+        for line in f:
+            non_free.add(line.strip())
+
 
 
 def download_file(driver, album_data=None):
@@ -245,6 +254,10 @@ def download_album(driver, url, email_album=False, retry=False):
         logger.error(
             f'{url} already downloaded. To download anyways, use option --force')
         return f'{url} already downloaded. To download anyways, use option --force'
+    if url in non_free and not arguments['--ignore-non-free']:
+        logger.error(
+            f'{url} is not free. To download anyways, use option --force or --ignore-non-free')
+        return f'{url} is not free. To download anyways, use option --force or --ignore-non-free'
     driver.get(url)
     wait()
     #sys.exit(0)
@@ -309,7 +322,7 @@ def download_album(driver, url, email_album=False, retry=False):
                 return download_album(driver, og_url, email_album, True)
         else:
              # name your price download
-             logger.info(f'{url} is not Free Download')
+             logger.info(f'{url} is not Free or is Name Your Price Download')
              button.click()
              wait()
              try:
@@ -327,6 +340,10 @@ def download_album(driver, url, email_album=False, retry=False):
                     checkout = driver.find_element(By.XPATH,xpath['checkout'])
                  except:
                     logger.error(f'{url} is not free')
+                    non_free.add(url)
+                    print(f'writing {url} to non free list')
+                    with open(config.get('non_free_history_file'), 'a') as f:
+                        f.write(f'{url}\n')
                     return f'{url} is not free'
              if checkout.text == 'Download Now':
                  checkout.click()
@@ -391,6 +408,7 @@ def build_artists_hash():
                 f'{options["format"]} is not a valid format. See "bcdl-free -h" for valid formats')
             sys.exit(1)
         init_downloaded()
+        #init_non_free()
         driver = get_driver()
         try:
             for artist in artist_hash:
@@ -428,6 +446,7 @@ def main():
                 f'{options["format"]} is not a valid format. See "bcdl-free -h" for valid formats')
             sys.exit(1)
         init_downloaded()
+        init_non_free()
     driver = get_driver()
     try:
         if arguments['-a']:
